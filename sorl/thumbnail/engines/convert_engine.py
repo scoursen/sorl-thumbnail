@@ -12,6 +12,8 @@ from tempfile import mkstemp
 
 size_re = re.compile(r'^(?:.+) (?:[A-Z]+) (?P<x>\d+)x(?P<y>\d+)')
 
+class FormatNotSupportedException(Exception):
+    pass
 
 class Engine(EngineBase):
     """
@@ -29,17 +31,27 @@ class Engine(EngineBase):
             image['options']['interlace'] = 'line'
         image['options']['quality'] = options['quality']
         args = settings.THUMBNAIL_CONVERT.split(' ')
-        args.append(image['source'])
+        args.append(image['source'] + '[0]')
         for k, v in image['options'].iteritems():
             args.append('-%s' % k)
             if v is not None:
                 args.append('%s' % v)
         args.append(out)
         args = map(smart_str, args)
-        p = Popen(args)
-        p.wait()
-        with open(out, 'rb') as fp:
-            thumbnail.write(fp.read())
+        try:
+            p = Popen(args)
+            p.wait()
+            with open(out, 'r') as fp:
+                buff = fp.read()
+                if not buff:
+                    raise FormatNotSupportedException()
+                thumbnail.write(buff)
+        except FormatNotSupportedException:
+            args[1] = ':'.join(['text', args[1]])
+            p = Popen(args)
+            p.wait()
+            with open(out, 'r') as fp:
+                thumbnail.write(fp.read())
         os.close(handle)
         os.remove(out)
         os.remove(image['source']) # we should not need this now
@@ -49,7 +61,7 @@ class Engine(EngineBase):
         Returns the backend image objects from a ImageFile instance
         """
         handle, tmp = mkstemp()
-        with open(tmp, 'wb') as fp:
+        with open(tmp, 'w') as fp:
             fp.write(source.read())
         os.close(handle)
         return {'source': tmp, 'options': SortedDict(), 'size': None}
@@ -59,12 +71,20 @@ class Engine(EngineBase):
         Returns the image width and height as a tuple
         """
         if image['size'] is None:
-            args = settings.THUMBNAIL_IDENTIFY.split(' ')
-            args.append(image['source'])
-            p = Popen(args, stdout=PIPE)
-            p.wait()
-            m = size_re.match(p.stdout.read())
-            image['size'] = int(m.group('x')), int(m.group('y'))
+            try:
+                args = settings.THUMBNAIL_IDENTIFY.split(' ')
+                args.append(image['source'])
+                p = Popen(args, stdout=PIPE)
+                p.wait()
+                m = size_re.match(p.stdout.read())
+                image['size'] = int(m.group('x')), int(m.group('y'))
+            except AttributeError:
+                args = settings.THUMBNAIL_IDENTIFY.split(' ')
+                args.append('text:' + image['source'])
+                p = Popen(args, stdout=PIPE)
+                p.wait()
+                m = size_re.match(p.stdout.read())
+                image['size'] = int(m.group('x')), int(m.group('y'))
         return image['size']
 
     def is_valid_image(self, raw_data):
@@ -73,7 +93,7 @@ class Engine(EngineBase):
         valid that it can use as input.
         """
         handle, tmp = mkstemp()
-        with open(tmp, 'wb') as fp:
+        with open(tmp, 'w') as fp:
             fp.write(raw_data)
             fp.flush()
             args = settings.THUMBNAIL_IDENTIFY.split(' ')
@@ -85,15 +105,13 @@ class Engine(EngineBase):
         return retcode == 0
 
     def _orientation(self, image):
-        return image
-        # XXX need to get the dimensions right after a transpose.
         if settings.THUMBNAIL_CONVERT.endswith('gm convert'):
             args = settings.THUMBNAIL_IDENTIFY.split()
             args.extend([ '-format', '%[exif:orientation]', image['source'] ])
             p = Popen(args, stdout=PIPE)
             p.wait()
             result = p.stdout.read().strip()
-            if result and result != 'unknown':
+            if result:
                 result = int(result)
                 options = image['options']
                 if result == 2:
